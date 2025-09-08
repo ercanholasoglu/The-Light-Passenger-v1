@@ -4,7 +4,7 @@ import requests
 import json
 from typing import List, Optional, TypedDict, Annotated
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
-from langchain_community.chat_models import ChatOllama
+from langchain_ollama import ChatOllama
 import re
 from neo4j import GraphDatabase
 import sys
