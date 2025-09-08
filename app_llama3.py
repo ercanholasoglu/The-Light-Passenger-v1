@@ -30,9 +30,12 @@ class Neo4jConnector:
 
     def connect(self):
         if self.driver is None:
-            self.driver = GraphDatabase.driver(self.uri, auth=(self.user, self.password))
-            with self.driver.session(database=self.database) as session:
-                session.run("RETURN 1")
+            try:
+                self.driver = GraphDatabase.driver(self.uri, auth=(self.user, self.password))
+                self.driver.verify_connectivity()
+            except Exception as e:
+                st.error(f"Neo4j veritabanına bağlanılamadı. Hata: {e}")
+                st.stop()
 
     def fetch(self, query):
         self.connect()
@@ -44,53 +47,40 @@ class Neo4jConnector:
         if self.driver:
             self.driver.close()
             self.driver = None
-
+            
 # ---------------- LLM Client ----------------
 def get_ollama_client():
     return ChatOllama(model=OLLAMA_MODEL_NAME, temperature=0.7)
 
-# ---------------- Data Fetch ----------------
-movie_query = """
-MATCH (m:Movie)
-OPTIONAL MATCH (m)-[:HAS_LANGUAGE]->(l:Language)
-OPTIONAL MATCH (m)-[:IN_GENRE]->(g:Genre)
-OPTIONAL MATCH (m)-[:MADE_IN]->(co:Country)
-OPTIONAL MATCH (m)<-[:PRODUCED]-(comp:Company)
-OPTIONAL MATCH (m)-[rel_avail:AVAILABLE_ON]->(p:Platform)
-OPTIONAL MATCH (m)<-[rel_acted:ACTED_IN]-(a:Person)
-OPTIONAL MATCH (m)<-[rel_worked:WORKED_AS]-(cr:Person)
-RETURN 
-    m { 
-        .title, .imdb_id, .imdb_rating, .imdb_votes, .metacritic,
-        .box_office, .awards, .rotten_tomatoes, .homepage, .budget,
-        .revenue, .vote_average, .vote_count, .runtime, .poster,
-        .rated, .overview
-    } AS movie_props, 
-    collect(DISTINCT {name: l.name, code: l.code}) AS languages, 
-    collect(DISTINCT g.name) AS genres, 
-    collect(DISTINCT co.name) AS countries, 
-    collect(DISTINCT comp.name) AS companies, 
-    collect(DISTINCT {name: a.name, character: rel_acted.character, order: rel_acted.order}) AS actors,
-    collect(DISTINCT {name: cr.name, job: rel_worked.job, department: rel_worked.department}) AS crew,
-    collect(DISTINCT {platform_name: p.name, country: rel_avail.country, type: rel_avail.type}) AS platforms
-"""
+# ---------------- Veri Çekme Fonksiyonları (Önbellekleme ile) ----------------
 
-places_query = """
-MATCH (p:Place)
-RETURN 
-    p.name AS name,
-    p.google_adres AS google_adres,
-    p.fiyat_seviyesi_simge AS fiyat_seviyesi_simge,
-    p.google_ortalama_puan AS google_ortalama_puan,
-    p.google_telefon AS google_telefon,
-    p.google_toplam_yorum AS google_toplam_yorum,
-    p.google_web_sitesi AS google_web_sitesi,
-    p.maps_linki AS maps_linki,
-    p.google_fotograf_linkleri AS google_fotograf_linkleri,
-    p.original_id AS original_id
-"""
-
+@st.cache_data(ttl=3600)
 def fetch_movies_data():
+    movie_query = """
+    MATCH (m:Movie)
+    OPTIONAL MATCH (m)-[:HAS_LANGUAGE]->(l:Language)
+    OPTIONAL MATCH (m)-[:IN_GENRE]->(g:Genre)
+    OPTIONAL MATCH (m)-[:MADE_IN]->(co:Country)
+    OPTIONAL MATCH (m)<-[:PRODUCED]-(comp:Company)
+    OPTIONAL MATCH (m)-[rel_avail:AVAILABLE_ON]->(p:Platform)
+    OPTIONAL MATCH (m)<-[rel_acted:ACTED_IN]-(a:Person)
+    OPTIONAL MATCH (m)<-[rel_worked:WORKED_AS]-(cr:Person)
+    RETURN 
+        m { 
+            .title, .imdb_id, .imdb_rating, .imdb_votes, .metacritic,
+            .box_office, .awards, .rotten_tomatoes, .homepage, .budget,
+            .revenue, .vote_average, .vote_count, .runtime, .poster,
+            .rated, .overview
+        } AS movie_props, 
+        collect(DISTINCT {name: l.name, code: l.code}) AS languages, 
+        collect(DISTINCT g.name) AS genres, 
+        collect(DISTINCT co.name) AS countries, 
+        collect(DISTINCT comp.name) AS companies, 
+        collect(DISTINCT {name: a.name, character: rel_acted.character, order: rel_acted.order}) AS actors,
+        collect(DISTINCT {name: cr.name, job: rel_worked.job, department: rel_worked.department}) AS crew,
+        collect(DISTINCT {platform_name: p.name, country: rel_avail.country, type: rel_avail.type}) AS platforms
+    LIMIT 200
+    """
     neo = Neo4jConnector(DATABASE_MOVIE)
     data = neo.fetch(movie_query)
     neo.close()
@@ -107,12 +97,29 @@ def fetch_movies_data():
         movies.append(m)
     return movies
 
+@st.cache_data(ttl=3600)
 def fetch_places_data():
+    places_query = """
+    MATCH (p:Place)
+    RETURN 
+        p.name AS name,
+        p.google_adres AS google_adres,
+        p.fiyat_seviyesi_simge AS fiyat_seviyesi_simge,
+        p.google_ortalama_puan AS google_ortalama_puan,
+        p.google_telefon AS google_telefon,
+        p.google_toplam_yorum AS google_toplam_yorum,
+        p.google_web_sitesi AS google_web_sitesi,
+        p.maps_linki AS maps_linki,
+        p.google_fotograf_linkleri AS google_fotograf_linkleri,
+        p.original_id AS original_id
+    LIMIT 200
+    """
     neo = Neo4jConnector(DATABASE_PLACE)
     data = neo.fetch(places_query)
     neo.close()
     return data
 
+# Verileri önceden yükle
 movies_data = fetch_movies_data()
 places_data = fetch_places_data()
 
@@ -120,8 +127,6 @@ places_data = fetch_places_data()
 class AgentState(TypedDict):
     messages: Annotated[List[BaseMessage], list]
     last_recommended_place: Optional[str]
-
-_executor = ThreadPoolExecutor(max_workers=2)
 
 system_message_template = """
 Sen bir sohbet robotusun ve kullanıcıya film, dizi veya İstanbul'da mekan önerileri sunuyorsun.
@@ -136,13 +141,13 @@ Eğer kullanıcı film veya dizi ile ilgili bir soru sorarsa:
 Eğer bilgi yoksa dürüstçe söyle.
 """
 
-def generate_response(state: AgentState) -> AgentState:
+def generate_llm_response(state: AgentState) -> AgentState:
     agent_state = st.session_state.agent_state
     user_message = state['messages'][-1].content
-    agent_state['messages'].append(HumanMessage(content=user_message))
-
+    
     last_user_lower = (user_message or "").lower()
     selected_places = []
+    data_context = ""
 
     is_place_request = any(k in last_user_lower for k in ["mekan","yer","restoran","bar","cafe","randevu","date"])
     
@@ -170,7 +175,7 @@ def generate_response(state: AgentState) -> AgentState:
                 f"Maps: {p.get('maps_linki','-')}\n"
                 f"Fotoğraflar: {fotos_text}\n"
             )
-        prompt_with_data = f"{system_message_template}\n\nİstanbul'daki uygun mekanlar:\n" + "\n".join(place_info) + f"\nKullanıcı: {user_message}"
+        data_context = "\n\nİstanbul'daki uygun mekanlar:\n" + "\n".join(place_info)
 
     else:
         movie_info = "\n".join([
@@ -178,10 +183,13 @@ def generate_response(state: AgentState) -> AgentState:
             f"Oyuncular: {', '.join([a.get('name') for a in m.get('actors',[]) if a.get('name')][:3])}"
             for m in movies_data[:5]
         ])
-        prompt_with_data = f"{system_message_template}\n\nFilm ve dizi verileri:\n{movie_info}\nKullanıcı: {user_message}"
-
+        data_context = "\n\nFilm ve dizi verileri:\n" + movie_info
+    
+    # LLM'e gönderilecek prompt'u oluştur
+    full_prompt = f"{system_message_template}\n\n{data_context}\n\nKullanıcı: {user_message}"
+    
     try:
-        response = st.session_state.ollama_client.invoke([HumanMessage(content=prompt_with_data)], temperature=0.7)
+        response = st.session_state.ollama_client.invoke([HumanMessage(content=full_prompt)], temperature=0.7)
         content_clean = re.sub(r"<TOOL>.*?</TOOL>", "", response.content, flags=re.DOTALL).strip()
         if not content_clean:
             content_clean = "Üzgünüm, şu anda yanıt oluşturamıyorum."
@@ -197,18 +205,29 @@ if 'agent_state' not in st.session_state:
 if 'ollama_client' not in st.session_state:
     st.session_state.ollama_client = get_ollama_client()
 
-st.title("İstanbul Chatbotu - Film & Mekan Önerileri")
-user_input = st.text_input("Sorunuzu yazın ve Enter'a basın:")
+st.set_page_config(page_title="İstanbul Chatbotu", layout="wide")
+st.title(" İstanbul Chatbotu: Film & Mekan Önerileri")
+st.write("Film, dizi veya İstanbul'da mekan önerileri almak için bir soru sorun.")
+
+# Sohbet geçmişini göster
+for msg in st.session_state.agent_state['messages']:
+    if isinstance(msg, HumanMessage):
+        st.markdown(f"**Siz:** {msg.content}")
+    elif isinstance(msg, AIMessage):
+        st.markdown(f"**Bot:** {msg.content}")
+
+user_input = st.chat_input("Sorunuzu yazın:")
 
 if user_input:
-    state = {'messages': [HumanMessage(content=user_input)]}
-    placeholder = st.empty()
-    placeholder.text("Yanıtınız oluşturuluyor...")
-    updated_state = generate_response(state)
-    placeholder.empty()
-
+    # Kullanıcı mesajını geçmişe ekle
+    st.session_state.agent_state['messages'].append(HumanMessage(content=user_input))
+    
+    # Yanıt oluşturulduğunu göster
+    with st.spinner("Yanıtınız oluşturuluyor..."):
+        # LLM'den yanıtı al
+        updated_state = generate_llm_response({'messages': [HumanMessage(content=user_input)]})
+    
+    # Yeni mesajı göster
     for msg in updated_state['messages']:
-        if isinstance(msg, HumanMessage):
-            st.markdown(f"**Siz:** {msg.content}")
-        elif isinstance(msg, AIMessage):
+        if isinstance(msg, AIMessage) and msg not in st.session_state.agent_state['messages']:
             st.markdown(f"**Bot:** {msg.content}")
