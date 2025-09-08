@@ -224,7 +224,7 @@ class AgentState(TypedDict):
 _executor = ThreadPoolExecutor(max_workers=2)
 
 def invoke_llm_with_timeout(messages, timeout_seconds=30):
-    client = get_ollama_client()
+    client = st.session_state.ollama_client  # yeniden yaratmıyoruz
     future = _executor.submit(client.invoke, messages)
     try:
         return future.result(timeout=timeout_seconds)
@@ -323,7 +323,7 @@ def generate_response(state: AgentState) -> AgentState:
 
 
     try:
-        response = invoke_llm_with_timeout([HumanMessage(content=prompt_with_data)], timeout_seconds=30)
+        response = invoke_llm_with_timeout([HumanMessage(content=prompt_with_data)], timeout_seconds=120)
         content = response.content.strip() or "Üzgünüm, şu anda yanıt oluşturamıyorum."
         return {"messages":[AIMessage(content=content)]}
     except Exception as e:
@@ -343,8 +343,20 @@ def create_workflow():
 st.set_page_config(page_title="The Light Passenger", layout="wide")
 st.title("The Light Passenger 📍")
 
+st.set_page_config(page_title="The Light Passenger", layout="wide")
+st.title("The Light Passenger 📍")
+
+# ----------------- LLM client -----------------
+if "ollama_client" not in st.session_state:
+    st.session_state.ollama_client = get_ollama_client()
+
+# ----------------- Session state messages -----------------
 if "messages" not in st.session_state:
     st.session_state.messages = []
+
+# ----------------- Neo4j connector -----------------
+neo4j_connector = Neo4jConnector()
+
 
 neo4j_connector = Neo4jConnector()
 
@@ -359,6 +371,7 @@ for message in st.session_state.messages:
     display_role = "user" if isinstance(message, HumanMessage) else "assistant"
     with st.chat_message(display_role):
         st.markdown(message.content, unsafe_allow_html=True)
+        
 
 if prompt := st.chat_input("Nasıl yardımcı olabilirim?"):
     if "conversation_thread_id" not in st.session_state:
