@@ -315,11 +315,11 @@ def generate_response(state: AgentState) -> AgentState:
 
     else:
         movie_info = "\n".join([
-            f"• {m.get('title','-')}, Türler: {', '.join(m.get('genres',[]))}, "
-            f"IMDb: {m.get('imdb_rating','-')}, Oyuncular: {', '.join([a.get('name','-') for a in m.get('actors',[])][:3])}"
-            for m in movies_data
-        ])
-        prompt_with_data = f"{system_message_template}\n\nFilm ve dizi verileri:\n{movie_info}\nKullanıcı: {last_user_message}"
+    f"• {m.get('title','-')}, Türler: {', '.join(m.get('genres',[]))}, "
+    f"IMDb: {m.get('imdb_rating','-')}, Oyuncular: {', '.join([a.get('name') for a in m.get('actors',[]) if a.get('name')][:3])}"
+    for m in movies_data
+])
+
 
     try:
         response = invoke_llm_with_timeout([HumanMessage(content=prompt_with_data)], timeout_seconds=30)
