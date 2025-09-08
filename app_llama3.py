@@ -47,7 +47,7 @@ class Neo4jConnector:
         if self.driver:
             self.driver.close()
             self.driver = None
-            
+
 # ---------------- LLM Client ----------------
 def get_ollama_client():
     return ChatOllama(model=OLLAMA_MODEL_NAME, temperature=0.7)
@@ -185,7 +185,6 @@ def generate_llm_response(state: AgentState) -> AgentState:
         ])
         data_context = "\n\nFilm ve dizi verileri:\n" + movie_info
     
-    # LLM'e gönderilecek prompt'u oluştur
     full_prompt = f"{system_message_template}\n\n{data_context}\n\nKullanıcı: {user_message}"
     
     try:
@@ -200,34 +199,38 @@ def generate_llm_response(state: AgentState) -> AgentState:
         return agent_state
 
 # ---------------- Streamlit App ----------------
+st.set_page_config(page_title="İstanbul Chatbotu", layout="wide")
+st.title("İstanbul Chatbotu: Film & Mekan Önerileri")
+
 if 'agent_state' not in st.session_state:
     st.session_state.agent_state = {'messages': [], 'last_recommended_place': None}
 if 'ollama_client' not in st.session_state:
     st.session_state.ollama_client = get_ollama_client()
 
-st.set_page_config(page_title="İstanbul Chatbotu", layout="wide")
-st.title(" İstanbul Chatbotu: Film & Mekan Önerileri")
-st.write("Film, dizi veya İstanbul'da mekan önerileri almak için bir soru sorun.")
-
 # Sohbet geçmişini göster
 for msg in st.session_state.agent_state['messages']:
     if isinstance(msg, HumanMessage):
-        st.markdown(f"**Siz:** {msg.content}")
+        with st.chat_message("user"):
+            st.markdown(msg.content)
     elif isinstance(msg, AIMessage):
-        st.markdown(f"**Bot:** {msg.content}")
+        with st.chat_message("assistant"):
+            st.markdown(msg.content)
 
 user_input = st.chat_input("Sorunuzu yazın:")
 
 if user_input:
-    # Kullanıcı mesajını geçmişe ekle
+    # Kullanıcı mesajını geçmişe ekle ve göster
     st.session_state.agent_state['messages'].append(HumanMessage(content=user_input))
+    with st.chat_message("user"):
+        st.markdown(user_input)
     
     # Yanıt oluşturulduğunu göster
-    with st.spinner("Yanıtınız oluşturuluyor..."):
-        # LLM'den yanıtı al
-        updated_state = generate_llm_response({'messages': [HumanMessage(content=user_input)]})
-    
-    # Yeni mesajı göster
-    for msg in updated_state['messages']:
-        if isinstance(msg, AIMessage) and msg not in st.session_state.agent_state['messages']:
-            st.markdown(f"**Bot:** {msg.content}")
+    with st.chat_message("assistant"):
+        with st.spinner("Yanıtınız oluşturuluyor..."):
+            # LLM'den yanıtı al
+            updated_state = generate_llm_response({'messages': [HumanMessage(content=user_input)]})
+            
+            # Yeni mesajı göster
+            for msg in updated_state['messages']:
+                if isinstance(msg, AIMessage) and msg not in st.session_state.agent_state['messages']:
+                    st.markdown(msg.content)
