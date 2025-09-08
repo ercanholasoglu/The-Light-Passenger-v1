@@ -17,8 +17,7 @@ import re
 import requests
 from cachetools import cached, TTLCache
 import graphviz
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.prompts import MessagesPlaceholder
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from operator import add
 import unicodedata
 from langgraph.checkpoint.memory import MemorySaver
@@ -42,7 +41,6 @@ def sanitize_markdown(text):
         return str(text)
     if not text:
         return ""
-    # Escape HTML-sensitive characters and some markdown characters
     text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
     markdown_chars = ['\\', '*', '_', '~', '`', '#', '[', ']', '(', ')', '{', '}', '!', '^']
     for char in markdown_chars:
@@ -50,58 +48,31 @@ def sanitize_markdown(text):
     return text
 
 def safe_markdown(text):
-    # placeholder - keep as-is for now
     return text
 
 def get_ollama_client():
-    # Önce environment variable kontrol et
-    model_name = os.getenv("OLLAMA_MODEL_NAME")
-    if model_name:
-        return model_name
+    model_name = OLLAMA_MODEL_NAME
+    return ChatOllama(model=model_name, temperature=0)
 
-    # Eğer set edilmemişse ollama list komutunu çalıştır
-    try:
-        result = subprocess.run(
-            ["ollama", "list"],
-            capture_output=True,
-            text=True,
-            check=True
-        )
-        output = result.stdout.strip()
-
-        # Hugging Face'den çektiğin modeli ara
-        for line in output.splitlines():
-            if "fine_tuned_llama3_8b_for_tr_gguf" in line:
-                model_name = line.split()[0]
-                return model_name
-
-        # Eğer hiç bulamazsa fallback
-        return "llama3"
-    except Exception as e:
-        print(f"Ollama list okunamadı: {e}")
-        return "llama3"
-
-
+# ---------------- Neo4j Connector ----------------
 class Neo4jConnector:
-    def __init__(self):
+    def __init__(self, db_name="neo4j"):
         self.uri = NEO4J_URI
         self.user = NEO4J_USER
         self.password = NEO4J_PASSWORD
-        self.database = "neo4j"
+        self.database = db_name
         self.driver = None
 
     def connect(self):
         if self.driver is None:
             try:
                 self.driver = GraphDatabase.driver(self.uri, auth=(self.user, self.password))
-                # quick connectivity check
                 with self.driver.session(database=self.database) as session:
                     session.run("RETURN 1")
             except Exception as exc:
                 raise ConnectionError(f"Neo4j bağlantı hatası: {exc}") from exc
 
     def save_chat_message(self, session_id: str, role: str, content: str, timestamp: datetime):
-        # This method may raise; callers should wrap it in try/except if they don't want app to crash.
         self.connect()
         query = """
         MERGE (s:ChatSession {id: $session_id})
@@ -120,20 +91,17 @@ class Neo4jConnector:
             self.driver.close()
             self.driver = None
 
-# Safe wrapper so DB issues don't break UI
 def safe_save_chat(neo4j_connector, session_id, role, content, timestamp):
     try:
-        if neo4j_connector is None:
-            return
-        neo4j_connector.save_chat_message(session_id, role, content, timestamp)
+        if neo4j_connector:
+            neo4j_connector.save_chat_message(session_id, role, content, timestamp)
     except Exception as e:
-        # Print to server logs; do not interrupt the app
         print(f"[Warning] Neo4j kaydı başarısız: {e}")
 
-# ---------------- Data fetch helper (unchanged) ----------------
+# ---------------- Data fetch ----------------
 DATABASE = "moviesandseries"
 
-query = """
+movie_query = """
 MATCH (m:Movie)
 OPTIONAL MATCH (m)-[:HAS_LANGUAGE]->(l:Language)
 OPTIONAL MATCH (m)-[:IN_GENRE]->(g:Genre)
@@ -183,12 +151,26 @@ RETURN
     }) AS platforms
 """
 
+places_query = """
+MATCH (p:Place)
+RETURN 
+    p.name AS name,
+    p.google_adres AS adres,
+    p.fiyat_seviyesi_simge AS fiyat,
+    p.google_ortalama_puan AS puan,
+    p.google_telefon AS telefon,
+    p.google_toplam_yorum AS yorum_sayisi,
+    p.google_web_sitesi AS web,
+    p.maps_linki AS maps_linki,
+    p.google_fotograf_linkleri AS fotograflar,
+    p.original_id AS original_id
+"""
+
 def fetch_all_movie_data_with_details(uri, username, password, db_name, cypher_query):
     driver = None
     try:
         driver = GraphDatabase.driver(uri, auth=(username, password))
         driver.verify_connectivity()
-        print(f"✅ Neo4j '{db_name}' veritabanına başarıyla bağlandı!")
         all_data = []
         with driver.session(database=db_name) as session:
             result = session.run(cypher_query)
@@ -205,14 +187,31 @@ def fetch_all_movie_data_with_details(uri, username, password, db_name, cypher_q
         return all_data
     except Exception as e:
         print(f"❌ Veri çekme hatası: {e}")
-        # Return empty list instead of exiting to avoid killing the app during startup
         return []
     finally:
         if driver:
             driver.close()
-            print("✅ Bağlantı kapatıldı.")
 
-movies_data = fetch_all_movie_data_with_details(NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD, DATABASE, query)
+def fetch_all_place_data(uri, username, password, db_name, cypher_query):
+    driver = None
+    try:
+        driver = GraphDatabase.driver(uri, auth=(username, password))
+        driver.verify_connectivity()
+        all_data = []
+        with driver.session(database=db_name) as session:
+            result = session.run(cypher_query)
+            for record in result:
+                all_data.append(dict(record))
+        return all_data
+    except Exception as e:
+        print(f"❌ Mekan verisi çekme hatası: {e}")
+        return []
+    finally:
+        if driver:
+            driver.close()
+
+movies_data = fetch_all_movie_data_with_details(NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD, DATABASE, movie_query)
+places_data = fetch_all_place_data(NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD, "neo4j", places_query)
 
 # ---------------- LangGraph / Agent helpers ----------------
 def add_messages(left: List[BaseMessage], right: List[BaseMessage]) -> List[BaseMessage]:
@@ -222,17 +221,10 @@ class AgentState(TypedDict):
     messages: Annotated[List[BaseMessage], add_messages]
     last_recommended_place: Optional[str]
 
-# ---------------- LLM helpers: cached client, timeouted invoke, safe_stream ----------------
 _executor = ThreadPoolExecutor(max_workers=2)
-
-@st.cache_resource
-def get_ollama_client():
-    model_name = OLLAMA_MODEL_NAME
-    return ChatOllama(model=model_name, temperature=0)
 
 def invoke_llm_with_timeout(messages, timeout_seconds=30):
     client = get_ollama_client()
-    # submit the client.invoke call -- many client.invoke implementations accept messages in a list/dict form
     future = _executor.submit(client.invoke, messages)
     try:
         return future.result(timeout=timeout_seconds)
@@ -240,15 +232,10 @@ def invoke_llm_with_timeout(messages, timeout_seconds=30):
         future.cancel()
         raise TimeoutError(f"LLM çağrısı {timeout_seconds}s içinde tamamlanmadı.")
     except Exception:
-        # pass through other exceptions to caller
         raise
 
 def safe_stream(app, payload, config=None, overall_timeout=60):
-    """
-    Run app.stream in background thread and yield items, raising TimeoutError on overall timeout.
-    """
     q = queue.Queue()
-
     def runner():
         try:
             for s in app.stream(payload, config=config):
@@ -256,7 +243,6 @@ def safe_stream(app, payload, config=None, overall_timeout=60):
             q.put(("done", None))
         except Exception as e:
             q.put(("error", e))
-
     t = threading.Thread(target=runner, daemon=True)
     t.start()
     start = time.time()
@@ -275,24 +261,73 @@ def safe_stream(app, payload, config=None, overall_timeout=60):
             continue
 
 # ---------------- Core agent logic ----------------
+system_message_template = """
+Sen bir sohbet robotusun ve kullanıcıya film, dizi veya İstanbul'da mekan önerileri sunuyorsun.
+Tüm yanıtların Türkçe olacak.
+Eğer kullanıcı İstanbul'da bir yer veya mekan sorarsa:
+- Yalnızca Neo4j'deki `places_data` verisini kullan,
+- Kullanıcının belirttiği semte uygun mekanları filtrele,
+- Mekanın adı, adresi, fiyat seviyesi, puanı, yorum sayısı, telefon, web sitesi ve maps linkini özetle,
+- Gereksiz hayali mekan ekleme.
+Eğer kullanıcı film veya dizi ile ilgili bir soru sorarsa:
+- Yalnızca `movies_data` verisini kullan.
+Eğer bilgi yoksa dürüstçe söyle.
+"""
 def generate_response(state: AgentState) -> AgentState:
     messages = state['messages']
-    try:
-        response = invoke_llm_with_timeout(messages, timeout_seconds=30)
-        # response might be an object with .content or dict-like
-        content = None
-        if hasattr(response, "content"):
-            content = response.content
+    last_user_message = messages[-1].content.lower()
+    selected_places = []
+
+    is_place_request = any(k in last_user_message for k in ["mekan", "yer", "restoran", "bar", "cafe", "randevu", "date"])
+
+    if is_place_request and places_data:
+        semt_keywords = ["suadiye", "kadıköy", "beşiktaş", "beyoğlu", "şişli", "ümraniye", "eyüpsultan", "göktürk"]
+        user_semt = next((k for k in semt_keywords if k in last_user_message), None)
+
+        if user_semt:
+            selected_places = [p for p in places_data if user_semt in p.get('google_adres','').lower()]
         else:
-            try:
-                content = response.get("content") if isinstance(response, dict) else str(response)
-            except Exception:
-                content = str(response)
-        return {"messages": [AIMessage(content=content)]}
-    except TimeoutError as te:
-        return {"messages": [AIMessage(content=f"Üzgünüm, yanıt zaman aşımına uğradı: {te}")] }
+            # Semt yoksa popüler mekanları puana göre sırala ve top 5 ver
+            selected_places = sorted(places_data, key=lambda x: x.get('google_ortalama_puan',0), reverse=True)[:5]
+
+        if not selected_places:
+            prompt_with_data = f"{system_message_template}\n\nÜzgünüm, '{user_semt}' semtinde uygun bir mekan bulunamadı. İstanbul genelinden öneri ister misiniz?\nKullanıcı: {last_user_message}"
+        else:
+            place_info = []
+            for p in selected_places:
+                fotos = p.get('google_fotograf_linkleri', [])
+                # Eğer liste karakter bazlı geliyorsa join et
+                if fotos and all(isinstance(c,str) and len(c)==1 for c in fotos):
+                    fotos = ["".join(fotos)]
+                fotos_text = ", ".join(fotos[:3]) if fotos else "-"
+                place_info.append(
+                    f"• {p.get('name','-')}\n"
+                    f"  Adres: {p.get('google_adres','-')}\n"
+                    f"  Fiyat Seviyesi: {p.get('fiyat_seviyesi_simge','-')}\n"
+                    f"  Puan: {p.get('google_ortalama_puan','-')}\n"
+                    f"  Yorum Sayısı: {p.get('google_toplam_yorum','-')}\n"
+                    f"  Telefon: {p.get('google_telefon','-')}\n"
+                    f"  Web Sitesi: {p.get('google_web_sitesi','-')}\n"
+                    f"  Harita Linki: {p.get('maps_linki','-')}\n"
+                    f"  Fotoğraflar: {fotos_text}"
+                )
+            prompt_with_data = f"{system_message_template}\n\nİstanbul'daki uygun mekanlar:\n" + "\n".join(place_info) + f"\nKullanıcı: {last_user_message}"
+
+    else:
+        movie_info = "\n".join([
+            f"• {m.get('title','-')}, Türler: {', '.join(m.get('genres',[]))}, "
+            f"IMDb: {m.get('imdb_rating','-')}, Oyuncular: {', '.join([a.get('name','-') for a in m.get('actors',[])][:3])}"
+            for m in movies_data
+        ])
+        prompt_with_data = f"{system_message_template}\n\nFilm ve dizi verileri:\n{movie_info}\nKullanıcı: {last_user_message}"
+
+    try:
+        response = invoke_llm_with_timeout([HumanMessage(content=prompt_with_data)], timeout_seconds=30)
+        content = response.content.strip() or "Üzgünüm, şu anda yanıt oluşturamıyorum."
+        return {"messages":[AIMessage(content=content)]}
     except Exception as e:
-        return {"messages": [AIMessage(content=f"Üzgünüm, şu an bir yanıt oluşturamıyorum. Hata: {e}")]}
+        return {"messages":[AIMessage(content=f"Üzgünüm, yanıt oluşturulamadı: {e}")]}
+
 
 def create_workflow():
     workflow = StateGraph(AgentState)
@@ -310,7 +345,8 @@ st.title("The Light Passenger 📍")
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# normalize stored messages (if they were saved as dicts)
+neo4j_connector = Neo4jConnector()
+
 for i, msg in enumerate(st.session_state.messages):
     if isinstance(msg, dict):
         if msg.get("role") == "user":
@@ -318,22 +354,17 @@ for i, msg in enumerate(st.session_state.messages):
         elif msg.get("role") == "assistant":
             st.session_state.messages[i] = AIMessage(content=msg.get("content", ""))
 
-neo4j_connector = Neo4jConnector()
-
-# render existing messages
 for message in st.session_state.messages:
     display_role = "user" if isinstance(message, HumanMessage) else "assistant"
     with st.chat_message(display_role):
         st.markdown(message.content, unsafe_allow_html=True)
 
-# chat input
 if prompt := st.chat_input("Nasıl yardımcı olabilirim?"):
     if "conversation_thread_id" not in st.session_state:
         st.session_state.conversation_thread_id = str(uuid.uuid4())
     session_id = st.session_state.conversation_thread_id
     user_message = HumanMessage(content=prompt)
     st.session_state.messages.append(user_message)
-    # use safe save so DB problems don't crash UI
     safe_save_chat(neo4j_connector, session_id, "user", prompt, datetime.now())
     with st.chat_message("user"):
         st.markdown(prompt)
@@ -343,7 +374,6 @@ if prompt := st.chat_input("Nasıl yardımcı olabilirim?"):
         config = {"configurable": {"thread_id": session_id}}
         latest_ai_message_content = ""
         try:
-            # use safe_stream to avoid blocking indefinitely
             for s in safe_stream(app, {"messages": st.session_state.messages}, config=config, overall_timeout=60):
                 for key in s:
                     node_output = s[key]
@@ -360,22 +390,17 @@ if prompt := st.chat_input("Nasıl yardımcı olabilirim?"):
                 with st.chat_message("assistant"):
                     st.markdown(sanitized_content, unsafe_allow_html=True)
             else:
-                error_msg = "Üzgünüm, bir yanıt üretemedim. LangGraph akışı tamamlandı ancak yapay zeka mesajı bulunamadı. Lütfen tekrar deneyin."
+                error_msg = "Üzgünüm, bir yanıt üretemedim."
                 ai_error_message = AIMessage(content=error_msg)
                 st.session_state.messages.append(ai_error_message)
                 safe_save_chat(neo4j_connector, session_id, "assistant", error_msg, datetime.now())
                 with st.chat_message("assistant"):
                     st.markdown(error_msg)
-                st.error("LangGraph akışı yapay zeka mesajı üretmeden tamamlandı.")
         except Exception as e:
-            error_message = f"Bir hata oluştu: {e}. Lütfen daha sonra tekrar deneyin."
+            error_message = f"Bir hata oluştu: {e}."
             st.error(f"Ana döngüde beklenmedik hata: {str(e)}")
-            print(f"ERROR in main loop: {str(e)}")
             ai_error_message = AIMessage(content=error_message)
             st.session_state.messages.append(ai_error_message)
             safe_save_chat(neo4j_connector, session_id, "assistant", error_message, datetime.now())
             with st.chat_message("assistant"):
                 st.markdown(error_message)
-                st.exception(e)
-
-# removed unconditional st.rerun() to avoid infinite reload loop
