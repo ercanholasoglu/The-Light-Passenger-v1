@@ -347,8 +347,13 @@ st.set_page_config(page_title="The Light Passenger", layout="wide")
 st.title("The Light Passenger 📍")
 
 # ----------------- LLM client -----------------
+# ----------------- LLM client -----------------
 if "ollama_client" not in st.session_state:
-    st.session_state.ollama_client = get_ollama_client()
+    try:
+        st.session_state.ollama_client = get_ollama_client()
+    except Exception as e:
+        st.error(f"LLM client başlatılamadı: {e}")
+
 
 # ----------------- Session state messages -----------------
 if "messages" not in st.session_state:
@@ -357,8 +362,6 @@ if "messages" not in st.session_state:
 # ----------------- Neo4j connector -----------------
 neo4j_connector = Neo4jConnector()
 
-
-neo4j_connector = Neo4jConnector()
 
 for i, msg in enumerate(st.session_state.messages):
     if isinstance(msg, dict):
