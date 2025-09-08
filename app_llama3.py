@@ -334,3 +334,29 @@ def generate_response(state: AgentState) -> AgentState:
         error_msg = f"Üzgünüm, yanıt oluşturulamadı: {e}"
         agent_state['messages'].append(AIMessage(content=error_msg))
         return agent_state
+
+# Streamlit başlatma ve state setup
+if 'agent_state' not in st.session_state:
+    st.session_state.agent_state = {
+        'messages': [],
+        'last_recommended_place': None
+    }
+if 'ollama_client' not in st.session_state:
+    st.session_state.ollama_client = get_ollama_client()
+
+st.title("İstanbul Film & Mekan Chatbotu")
+
+user_input = st.text_input("Sorunuzu yazın ve Enter'a basın:")
+
+if user_input:
+    # Mesaj ekle
+    state = {'messages': [HumanMessage(content=user_input)]}
+    # Yanıt üret
+    updated_state = generate_response(state)
+    
+    # Mesajları ekrana yaz
+    for msg in updated_state['messages'][-2:]:  # son kullanıcı ve AI mesajını göster
+        if isinstance(msg, HumanMessage):
+            st.markdown(f"**Siz:** {msg.content}")
+        elif isinstance(msg, AIMessage):
+            st.markdown(f"**Bot:** {msg.content}")
