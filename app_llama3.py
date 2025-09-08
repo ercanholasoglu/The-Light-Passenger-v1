@@ -11,27 +11,23 @@ ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
 TOOLS_SERVER_URL = "http://localhost:8000"
 
 # ---------------- Tool Tanımları ----------------
-tools = requests.get(f"{TOOLS_SERVER_URL}/tools").json()
+try:
+    tools_response = requests.get(f"{TOOLS_SERVER_URL}/tools")
+    tools_response.raise_for_status()
+    tools = tools_response.json()
+except requests.exceptions.RequestException as e:
+    st.error(f"Araç sunucusuna bağlanılamadı. Lütfen uvicorn sunucusunun çalıştığından emin olun. Hata: {e}")
+    st.stop()
 
 # ---------------- Agent Helpers ----------------
 class AgentState(TypedDict):
     messages: Annotated[List[BaseMessage], list]
     last_recommended_place: Optional[str]
 
-system_message_template = """
-Sen bir sohbet robotusun ve kullanıcıya film, dizi veya İstanbul'da mekan önerileri sunuyorsun.
-Ayrıca rezervasyon yapma ve sinema bileti bulma gibi işlemler için araçları kullanabilirsin.
-Tüm yanıtların Türkçe olacak.
----
-Kullanılacak araçlar:
-{tools_schema}
----
-"""
-
 def generate_claude_response_with_tools(state: AgentState) -> AgentState:
     agent_state = st.session_state.agent_state
     user_message_content = state['messages'][-1].content
-    
+
     # Tool'ları Anthropic API'nin beklediği formata dönüştür
     tools_for_claude = [
         {
@@ -61,38 +57,48 @@ def generate_claude_response_with_tools(state: AgentState) -> AgentState:
         }
     ).json()
 
-    # Modelin yanıtını kontrol et
+    # Yanıtı kontrol et ve işle
+    if not response.get("content"):
+        final_content = "Üzgünüm, şu anda bir yanıt oluşturamıyorum. Lütfen daha sonra tekrar deneyin."
+        agent_state['messages'].append(AIMessage(content=final_content))
+        return agent_state
+
+    # Eğer model tool kullanmaya karar verirse
     if response.get("stop_reason") == "tool_use":
         tool_use = response["content"][0]
         tool_name = tool_use["name"]
         tool_input = tool_use["input"]
         
-        # Tool'u çağır
-        tool_response = requests.get(f"{TOOLS_SERVER_URL}/tools/{tool_name}", params=tool_input).json()
+        try:
+            # Tool'u çağır
+            tool_response = requests.get(f"{TOOLS_SERVER_URL}/tools/{tool_name}", params=tool_input).json()
 
-        # Tool'un sonucunu tekrar Claude'a gönder
-        second_response = requests.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={
-                "x-api-key": ANTHROPIC_API_KEY,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json"
-            },
-            json={
-                "model": "claude-3-sonnet-20240229",
-                "max_tokens": 1024,
-                "messages": [
-                    {"role": "user", "content": user_message_content},
-                    {"role": "assistant", "content": [{"type": "tool_use", "id": tool_use["id"], "name": tool_name, "input": tool_input}]},
-                    {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tool_use["id"], "content": json.dumps(tool_response)}]}
-                ]
-            }
-        ).json()
-        
-        final_content = second_response["content"][0]["text"]
-        agent_state['messages'].append(AIMessage(content=final_content))
+            # Tool'un sonucunu tekrar Claude'a gönder
+            second_response = requests.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "x-api-key": ANTHROPIC_API_KEY,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json"
+                },
+                json={
+                    "model": "claude-3-sonnet-20240229",
+                    "max_tokens": 1024,
+                    "messages": [
+                        {"role": "user", "content": user_message_content},
+                        {"role": "assistant", "content": [{"type": "tool_use", "id": tool_use["id"], "name": tool_name, "input": tool_input}]},
+                        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tool_use["id"], "content": json.dumps(tool_response)}]}
+                    ]
+                }
+            ).json()
+            
+            # Yanıtı al
+            final_content = second_response.get("content", [{}])[0].get("text", "Araç çağrısı sonrası bir yanıt alınamadı.")
+            agent_state['messages'].append(AIMessage(content=final_content))
+        except requests.exceptions.RequestException as e:
+            agent_state['messages'].append(AIMessage(content=f"API çağrısı sırasında bir hata oluştu: {e}"))
     else:
-        # Eğer model tool kullanmaya karar vermezse, doğrudan metin yanıtı ver
+        # Eğer model tool kullanmazsa, doğrudan metin yanıtı ver
         final_content = response["content"][0]["text"]
         agent_state['messages'].append(AIMessage(content=final_content))
         
@@ -125,6 +131,7 @@ if user_input:
         with st.spinner("Yanıtınız oluşturuluyor..."):
             updated_state = generate_claude_response_with_tools({'messages': [HumanMessage(content=user_input)]})
             
+            # Yanıtı sohbet geçmişine ekle ve göster
             for msg in updated_state['messages']:
                 if isinstance(msg, AIMessage) and msg not in st.session_state.agent_state['messages']:
                     st.markdown(msg.content)
