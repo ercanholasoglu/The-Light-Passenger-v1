@@ -1,15 +1,33 @@
 import streamlit as st
 import time
-import re
-import queue
-import threading
-from datetime import datetime
-from typing import List, Optional, TypedDict, Annotated
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
+import getpass
 from neo4j import GraphDatabase
+from datetime import datetime
+from typing import List, Dict, Any, Optional, TypedDict, Annotated
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
+from langchain_core.documents import Document
+from langchain_community.llms import Ollama
 from langchain_community.chat_models import ChatOllama
+from langchain_community.vectorstores import InMemoryVectorStore
+from langchain_community.embeddings import OllamaEmbeddings
+from langgraph.graph import StateGraph, END, START
+from langgraph.graph.message import add_messages as lg_add_messages
+import sys
+import re
+import requests
+from cachetools import cached, TTLCache
+import graphviz
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from operator import add
+import unicodedata
+from langgraph.checkpoint.memory import MemorySaver
+import random
 import os
+import uuid
+import threading
+import queue
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
+import subprocess
 
 # ---------------- Ortam değişkenleri ----------------
 NEO4J_URI = os.environ.get("NEO4J_URI")
@@ -18,6 +36,20 @@ NEO4J_PASSWORD = os.environ.get("NEO4J_PASSWORD")
 OLLAMA_MODEL_NAME = os.environ.get("OLLAMA_MODEL_NAME", "llama3-8b-tr")
 
 # ---------------- Utility functions ----------------
+def sanitize_markdown(text):
+    if not isinstance(text, str):
+        return str(text)
+    if not text:
+        return ""
+    text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    markdown_chars = ['\\', '*', '_', '~', '`', '#', '[', ']', '(', ')', '{', '}', '!', '^']
+    for char in markdown_chars:
+        text = text.replace(char, f"\\{char}")
+    return text
+
+def safe_markdown(text):
+    return text
+
 def get_ollama_client():
     return ChatOllama(model=OLLAMA_MODEL_NAME, temperature=0.7)
 
@@ -32,9 +64,12 @@ class Neo4jConnector:
 
     def connect(self):
         if self.driver is None:
-            self.driver = GraphDatabase.driver(self.uri, auth=(self.user, self.password))
-            with self.driver.session(database=self.database) as session:
-                session.run("RETURN 1")
+            try:
+                self.driver = GraphDatabase.driver(self.uri, auth=(self.user, self.password))
+                with self.driver.session(database=self.database) as session:
+                    session.run("RETURN 1")
+            except Exception as exc:
+                raise ConnectionError(f"Neo4j bağlantı hatası: {exc}") from exc
 
     def save_chat_message(self, session_id: str, role: str, content: str, timestamp: datetime):
         self.connect()
@@ -65,7 +100,6 @@ def safe_save_chat(neo4j_connector, session_id, role, content, timestamp):
 # ---------------- Data fetch ----------------
 DATABASE = "moviesandseries"
 
-# Filmler ve mekanlar verisi çekme (önceden tanımlı query'ler)
 movie_query = """
 MATCH (m:Movie)
 OPTIONAL MATCH (m)-[:HAS_LANGUAGE]->(l:Language)
@@ -131,14 +165,14 @@ RETURN
     p.original_id AS original_id
 """
 
-def fetch_all_movie_data(uri, user, password, db_name, query):
+def fetch_all_movie_data_with_details(uri, username, password, db_name, cypher_query):
     driver = None
     try:
-        driver = GraphDatabase.driver(uri, auth=(user, password))
+        driver = GraphDatabase.driver(uri, auth=(username, password))
         driver.verify_connectivity()
         all_data = []
         with driver.session(database=db_name) as session:
-            result = session.run(query)
+            result = session.run(cypher_query)
             for record in result:
                 movie_data = dict(record["movie_props"])
                 movie_data["genres"] = record["genres"]
@@ -157,14 +191,14 @@ def fetch_all_movie_data(uri, user, password, db_name, query):
         if driver:
             driver.close()
 
-def fetch_all_place_data(uri, user, password, db_name, query):
+def fetch_all_place_data(uri, username, password, db_name, cypher_query):
     driver = None
     try:
-        driver = GraphDatabase.driver(uri, auth=(user, password))
+        driver = GraphDatabase.driver(uri, auth=(username, password))
         driver.verify_connectivity()
         all_data = []
         with driver.session(database=db_name) as session:
-            result = session.run(query)
+            result = session.run(cypher_query)
             for record in result:
                 all_data.append(dict(record))
         return all_data
@@ -175,22 +209,25 @@ def fetch_all_place_data(uri, user, password, db_name, query):
         if driver:
             driver.close()
 
-movies_data = fetch_all_movie_data(NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD, DATABASE, movie_query)
+movies_data = fetch_all_movie_data_with_details(NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD, DATABASE, movie_query)
 places_data = fetch_all_place_data(NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD, "neo4j", places_query)
 
-# ---------------- Agent helpers ----------------
+# ---------------- LangGraph / Agent helpers ----------------
+def add_messages(left: List[BaseMessage], right: List[BaseMessage]) -> List[BaseMessage]:
+    return left + right
+
 class AgentState(TypedDict):
-    messages: Annotated[List[BaseMessage], lambda x,y: x+y]
+    messages: Annotated[List[BaseMessage], add_messages]
     last_recommended_place: Optional[str]
 
 _executor = ThreadPoolExecutor(max_workers=2)
 
+# ---------------- Core agent logic ----------------
 system_message_template = """
 Sen bir sohbet robotusun ve kullanıcıya film, dizi veya İstanbul'da mekan önerileri sunuyorsun.
 Tüm yanıtların Türkçe olacak.
 Eğer kullanıcı İstanbul'da bir yer veya mekan sorarsa:
 - Yalnızca Neo4j'deki `places_data` verisini kullan,
-- Kullanıcının belirttiği semte uygun mekanları filtrele,
 - Mekanın adı, adresi, fiyat seviyesi, puanı, yorum sayısı, telefon, web sitesi ve maps linkini özetle,
 - Gereksiz hayali mekan ekleme.
 Eğer kullanıcı film veya dizi ile ilgili bir soru sorarsa:
@@ -203,7 +240,7 @@ def generate_response(state: AgentState) -> AgentState:
     user_message = state['messages'][-1].content
     agent_state['messages'].append(HumanMessage(content=user_message))
     
-    last_user_message_lower = user_message.lower()
+    last_user_message_lower = user_message.lower() if user_message else ""
     selected_places = []
 
     is_place_request = any(k in last_user_message_lower for k in ["mekan", "yer", "restoran", "bar", "cafe", "randevu", "date"])
@@ -213,9 +250,11 @@ def generate_response(state: AgentState) -> AgentState:
         user_semt = next((k for k in semt_keywords if k in last_user_message_lower), None)
 
         if user_semt:
-            selected_places = [p for p in places_data if re.search(user_semt, p.get('google_adres','').lower())]
+            selected_places = [p for p in places_data 
+                               if p.get('google_adres') and re.search(user_semt, p.get('google_adres','').lower())]
         else:
-            selected_places = sorted(places_data, key=lambda x: x.get('google_ortalama_puan',0), reverse=True)[:5]
+            selected_places = sorted([p for p in places_data if p.get('google_ortalama_puan')], 
+                                     key=lambda x: x.get('google_ortalama_puan',0), reverse=True)[:5]
 
         if selected_places:
             place_info = []
@@ -225,15 +264,15 @@ def generate_response(state: AgentState) -> AgentState:
                     fotos = ["".join(fotos)]
                 fotos_text = ", ".join(fotos[:3]) if fotos else "-"
                 place_info.append(
-                    f"### {p.get('name','-')}\n"
-                    f"- Adres: {p.get('google_adres','-')}\n"
-                    f"- Fiyat Seviyesi: {p.get('fiyat_seviyesi_simge','-')}\n"
-                    f"- Puan: {p.get('google_ortalama_puan','-')}\n"
-                    f"- Yorum Sayısı: {p.get('google_toplam_yorum','-')}\n"
-                    f"- Telefon: {p.get('google_telefon','-')}\n"
-                    f"- Web Sitesi: {p.get('google_web_sitesi','-')}\n"
-                    f"- Harita Linki: {p.get('maps_linki','-')}\n"
-                    f"- Fotoğraflar: {fotos_text}\n"
+                    f"{p.get('name','-')}\n"
+                    f"Adres: {p.get('google_adres','-')}\n"
+                    f"Fiyat Seviyesi: {p.get('fiyat_seviyesi_simge','-')}\n"
+                    f"Puan: {p.get('google_ortalama_puan','-')}\n"
+                    f"Yorum Sayısı: {p.get('google_toplam_yorum','-')}\n"
+                    f"Telefon: {p.get('google_telefon','-')}\n"
+                    f"Web Sitesi: {p.get('google_web_sitesi','-')}\n"
+                    f"Harita Linki: {p.get('maps_linki','-')}\n"
+                    f"Fotoğraflar: {fotos_text}\n"
                 )
             prompt_with_data = f"{system_message_template}\n\nİstanbul'daki uygun mekanlar:\n" + "\n".join(place_info) + f"\nKullanıcı: {user_message}"
         else:
@@ -241,8 +280,8 @@ def generate_response(state: AgentState) -> AgentState:
 
     else:
         movie_info = "\n".join([
-            f"• {m.get('title','-')}, Türler: {', '.join(m.get('genres',[]))}, "
-            f"IMDb: {m.get('imdb_rating','-')}, Oyuncular: {', '.join([a.get('name') for a in m.get('actors',[]) if a.get('name')][:3])}"
+            f"{m.get('title','-')}, Türler: {', '.join(m.get('genres',[]))}, "
+            f"IMDb: {m.get('imdb_rating','-')}"
             for m in movies_data
         ])
         prompt_with_data = f"{system_message_template}\n\nFilm ve dizi verileri:\n{movie_info}\nKullanıcı: {user_message}"
@@ -257,7 +296,7 @@ def generate_response(state: AgentState) -> AgentState:
         return agent_state
 
 # ---------------- Streamlit App ----------------
-st.title("İstanbul Chatbotu - Film & Mekan Önerileri")
+st.title("İstanbul Film & Mekan Chatbotu")
 
 if 'agent_state' not in st.session_state:
     st.session_state.agent_state = {'messages': [], 'last_recommended_place': None}
