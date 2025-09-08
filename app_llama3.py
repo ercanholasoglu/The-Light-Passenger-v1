@@ -52,7 +52,8 @@ def safe_markdown(text):
 
 def get_ollama_client():
     model_name = OLLAMA_MODEL_NAME
-    return ChatOllama(model=model_name, temperature=0)
+    # Temperature sabit 0.7
+    return ChatOllama(model=model_name, temperature=0.7)
 
 # ---------------- Neo4j Connector ----------------
 class Neo4jConnector:
@@ -155,14 +156,14 @@ places_query = """
 MATCH (p:Place)
 RETURN 
     p.name AS name,
-    p.google_adres AS adres,
-    p.fiyat_seviyesi_simge AS fiyat,
-    p.google_ortalama_puan AS puan,
-    p.google_telefon AS telefon,
-    p.google_toplam_yorum AS yorum_sayisi,
-    p.google_web_sitesi AS web,
+    p.google_adres AS google_adres,
+    p.fiyat_seviyesi_simge AS fiyat_seviyesi_simge,
+    p.google_ortalama_puan AS google_ortalama_puan,
+    p.google_telefon AS google_telefon,
+    p.google_toplam_yorum AS google_toplam_yorum,
+    p.google_web_sitesi AS google_web_sitesi,
     p.maps_linki AS maps_linki,
-    p.google_fotograf_linkleri AS fotograflar,
+    p.google_fotograf_linkleri AS google_fotograf_linkleri,
     p.original_id AS original_id
 """
 
@@ -234,7 +235,6 @@ def invoke_llm_with_timeout(messages, timeout_seconds=120):
     except Exception:
         raise
 
-
 def safe_stream(app, payload, config=None, overall_timeout=60):
     q = queue.Queue()
     def runner():
@@ -274,30 +274,30 @@ Eğer kullanıcı film veya dizi ile ilgili bir soru sorarsa:
 - Yalnızca `movies_data` verisini kullan.
 Eğer bilgi yoksa dürüstçe söyle.
 """
+
 def generate_response(state: AgentState) -> AgentState:
-    messages = state['messages']
-    last_user_message = messages[-1].content.lower()
+    agent_state = st.session_state.agent_state
+    user_message = state['messages'][-1].content
+    agent_state['messages'].append(HumanMessage(content=user_message))
+    
+    last_user_message_lower = user_message.lower()
     selected_places = []
 
-    is_place_request = any(k in last_user_message for k in ["mekan", "yer", "restoran", "bar", "cafe", "randevu", "date"])
+    is_place_request = any(k in last_user_message_lower for k in ["mekan", "yer", "restoran", "bar", "cafe", "randevu", "date"])
 
     if is_place_request and places_data:
         semt_keywords = ["suadiye", "kadıköy", "beşiktaş", "beyoğlu", "şişli", "ümraniye", "eyüpsultan", "göktürk"]
-        user_semt = next((k for k in semt_keywords if k in last_user_message), None)
+        user_semt = next((k for k in semt_keywords if k in last_user_message_lower), None)
 
         if user_semt:
-            selected_places = [p for p in places_data if user_semt in p.get('google_adres','').lower()]
+            selected_places = [p for p in places_data if re.search(user_semt, p.get('google_adres','').lower())]
         else:
-            # Semt yoksa popüler mekanları puana göre sırala ve top 5 ver
             selected_places = sorted(places_data, key=lambda x: x.get('google_ortalama_puan',0), reverse=True)[:5]
 
-        if not selected_places:
-            prompt_with_data = f"{system_message_template}\n\nÜzgünüm, '{user_semt}' semtinde uygun bir mekan bulunamadı. İstanbul genelinden öneri ister misiniz?\nKullanıcı: {last_user_message}"
-        else:
+        if selected_places:
             place_info = []
             for p in selected_places:
                 fotos = p.get('google_fotograf_linkleri', [])
-                # Eğer liste karakter bazlı geliyorsa join et
                 if fotos and all(isinstance(c,str) and len(c)==1 for c in fotos):
                     fotos = ["".join(fotos)]
                 fotos_text = ", ".join(fotos[:3]) if fotos else "-"
@@ -312,7 +312,9 @@ def generate_response(state: AgentState) -> AgentState:
                     f"  Harita Linki: {p.get('maps_linki','-')}\n"
                     f"  Fotoğraflar: {fotos_text}"
                 )
-            prompt_with_data = f"{system_message_template}\n\nİstanbul'daki uygun mekanlar:\n" + "\n".join(place_info) + f"\nKullanıcı: {last_user_message}"
+            prompt_with_data = f"{system_message_template}\n\nİstanbul'daki uygun mekanlar:\n" + "\n".join(place_info) + f"\nKullanıcı: {user_message}"
+        else:
+            prompt_with_data = f"{system_message_template}\n\nÜzgünüm, '{user_semt}' semtinde uygun bir mekan bulunamadı. İstanbul genelinden öneri ister misiniz?\nKullanıcı: {user_message}"
 
     else:
         movie_info = "\n".join([
@@ -320,104 +322,15 @@ def generate_response(state: AgentState) -> AgentState:
             f"IMDb: {m.get('imdb_rating','-')}, Oyuncular: {', '.join([a.get('name') for a in m.get('actors',[]) if a.get('name')][:3])}"
             for m in movies_data
         ])
-        prompt_with_data = f"{system_message_template}\n\nFilm ve dizi verileri:\n{movie_info}\nKullanıcı: {last_user_message}"
-
+        prompt_with_data = f"{system_message_template}\n\nFilm ve dizi verileri:\n{movie_info}\nKullanıcı: {user_message}"
 
     try:
-        response = invoke_llm_with_timeout([HumanMessage(content=prompt_with_data)], timeout_seconds=120)
+        # Temperature sabit 0.7
+        response = st.session_state.ollama_client.invoke([HumanMessage(content=prompt_with_data)], temperature=0.7)
         content = response.content.strip() or "Üzgünüm, şu anda yanıt oluşturamıyorum."
-        return {"messages":[AIMessage(content=content)]}
+        agent_state['messages'].append(AIMessage(content=content))
+        return agent_state
     except Exception as e:
-        return {"messages":[AIMessage(content=f"Üzgünüm, yanıt oluşturulamadı: {e}")]}
-
-
-def create_workflow():
-    workflow = StateGraph(AgentState)
-    workflow.add_node("generate_response", generate_response)
-    workflow.set_entry_point("generate_response")
-    workflow.add_edge("generate_response", END)
-    memory = MemorySaver()
-    app = workflow.compile(checkpointer=memory)
-    return app
-
-# ---------------- Streamlit UI ----------------
-st.set_page_config(page_title="The Light Passenger", layout="wide")
-st.title("The Light Passenger 📍")
-
-
-# ----------------- LLM client -----------------
-
-ollama_client = None
-
-if ollama_client is None:
-    try:
-        ollama_client = get_ollama_client()
-    except Exception as e:
-        st.error(f"LLM client başlatılamadı: {e}")
-
-# ----------------- Session state messages -----------------
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-
-# ----------------- Neo4j connector -----------------
-neo4j_connector = Neo4jConnector()
-
-
-for i, msg in enumerate(st.session_state.messages):
-    if isinstance(msg, dict):
-        if msg.get("role") == "user":
-            st.session_state.messages[i] = HumanMessage(content=msg.get("content", ""))
-        elif msg.get("role") == "assistant":
-            st.session_state.messages[i] = AIMessage(content=msg.get("content", ""))
-
-for message in st.session_state.messages:
-    display_role = "user" if isinstance(message, HumanMessage) else "assistant"
-    with st.chat_message(display_role):
-        st.markdown(message.content, unsafe_allow_html=True)
-        
-
-if prompt := st.chat_input("Nasıl yardımcı olabilirim?"):
-    if "conversation_thread_id" not in st.session_state:
-        st.session_state.conversation_thread_id = str(uuid.uuid4())
-    session_id = st.session_state.conversation_thread_id
-    user_message = HumanMessage(content=prompt)
-    st.session_state.messages.append(user_message)
-    safe_save_chat(neo4j_connector, session_id, "user", prompt, datetime.now())
-    with st.chat_message("user"):
-        st.markdown(prompt)
-
-    with st.spinner("Yanıt oluşturuluyor..."):
-        app = create_workflow()
-        config = {"configurable": {"thread_id": session_id}}
-        latest_ai_message_content = ""
-        try:
-            for s in safe_stream(app, {"messages": st.session_state.messages}, config=config, overall_timeout=60):
-                for key in s:
-                    node_output = s[key]
-                    if "messages" in node_output:
-                        for msg in reversed(node_output["messages"]):
-                            if isinstance(msg, AIMessage) and getattr(msg, "content", None):
-                                latest_ai_message_content = msg.content
-                                break
-            if latest_ai_message_content:
-                sanitized_content = sanitize_markdown(latest_ai_message_content)
-                ai_message = AIMessage(content=sanitized_content)
-                st.session_state.messages.append(ai_message)
-                safe_save_chat(neo4j_connector, session_id, "assistant", sanitized_content, datetime.now())
-                with st.chat_message("assistant"):
-                    st.markdown(sanitized_content, unsafe_allow_html=True)
-            else:
-                error_msg = "Üzgünüm, bir yanıt üretemedim."
-                ai_error_message = AIMessage(content=error_msg)
-                st.session_state.messages.append(ai_error_message)
-                safe_save_chat(neo4j_connector, session_id, "assistant", error_msg, datetime.now())
-                with st.chat_message("assistant"):
-                    st.markdown(error_msg)
-        except Exception as e:
-            error_message = f"Bir hata oluştu: {e}."
-            st.error(f"Ana döngüde beklenmedik hata: {str(e)}")
-            ai_error_message = AIMessage(content=error_message)
-            st.session_state.messages.append(ai_error_message)
-            safe_save_chat(neo4j_connector, session_id, "assistant", error_message, datetime.now())
-            with st.chat_message("assistant"):
-                st.markdown(error_message)
+        error_msg = f"Üzgünüm, yanıt oluşturulamadı: {e}"
+        agent_state['messages'].append(AIMessage(content=error_msg))
+        return agent_state
