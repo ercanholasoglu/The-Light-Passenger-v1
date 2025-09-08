@@ -28,6 +28,7 @@ import uuid
 import threading
 import queue
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
+import subprocess
 
 # Ortam değişkenlerini al
 NEO4J_URI = os.environ.get("NEO4J_URI")
@@ -52,7 +53,35 @@ def safe_markdown(text):
     # placeholder - keep as-is for now
     return text
 
-# ---------------- Neo4j Connector ----------------
+def get_ollama_client():
+    # Önce environment variable kontrol et
+    model_name = os.getenv("OLLAMA_MODEL_NAME")
+    if model_name:
+        return model_name
+
+    # Eğer set edilmemişse ollama list komutunu çalıştır
+    try:
+        result = subprocess.run(
+            ["ollama", "list"],
+            capture_output=True,
+            text=True,
+            check=True
+        )
+        output = result.stdout.strip()
+
+        # Hugging Face'den çektiğin modeli ara
+        for line in output.splitlines():
+            if "fine_tuned_llama3_8b_for_tr_gguf" in line:
+                model_name = line.split()[0]
+                return model_name
+
+        # Eğer hiç bulamazsa fallback
+        return "llama3"
+    except Exception as e:
+        print(f"Ollama list okunamadı: {e}")
+        return "llama3"
+
+
 class Neo4jConnector:
     def __init__(self):
         self.uri = NEO4J_URI
