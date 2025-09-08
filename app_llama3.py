@@ -223,8 +223,8 @@ class AgentState(TypedDict):
 
 _executor = ThreadPoolExecutor(max_workers=2)
 
-def invoke_llm_with_timeout(messages, timeout_seconds=30):
-    client = st.session_state.ollama_client  # yeniden yaratmıyoruz
+def invoke_llm_with_timeout(messages, timeout_seconds=120):
+    client = ollama_client  # artık st.session_state kullanmıyoruz
     future = _executor.submit(client.invoke, messages)
     try:
         return future.result(timeout=timeout_seconds)
@@ -233,6 +233,7 @@ def invoke_llm_with_timeout(messages, timeout_seconds=30):
         raise TimeoutError(f"LLM çağrısı {timeout_seconds}s içinde tamamlanmadı.")
     except Exception:
         raise
+
 
 def safe_stream(app, payload, config=None, overall_timeout=60):
     q = queue.Queue()
@@ -343,17 +344,16 @@ def create_workflow():
 st.set_page_config(page_title="The Light Passenger", layout="wide")
 st.title("The Light Passenger 📍")
 
-st.set_page_config(page_title="The Light Passenger", layout="wide")
-st.title("The Light Passenger 📍")
 
 # ----------------- LLM client -----------------
-# ----------------- LLM client -----------------
-if "ollama_client" not in st.session_state:
+
+ollama_client = None
+
+if ollama_client is None:
     try:
-        st.session_state.ollama_client = get_ollama_client()
+        ollama_client = get_ollama_client()
     except Exception as e:
         st.error(f"LLM client başlatılamadı: {e}")
-
 
 # ----------------- Session state messages -----------------
 if "messages" not in st.session_state:
