@@ -3,6 +3,10 @@ from pydantic import BaseModel
 from typing import List, Optional, Dict
 import os
 from neo4j import GraphDatabase
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 app = FastAPI()
 
@@ -34,6 +38,13 @@ class Neo4jConnector:
         with self.driver.session(database=self.database) as session:
             result = session.run(query)
             return [dict(record) for record in result]
+            
+    def count_nodes(self, label):
+        self.connect()
+        query = f"MATCH (n:{label}) RETURN count(n) AS count"
+        with self.driver.session(database=self.database) as session:
+            result = session.run(query).single()
+            return result["count"] if result else 0
 
     def close(self):
         if self.driver:
@@ -133,9 +144,6 @@ RESERVATION_DATA = {
         }
     }
 }
-
-
-
 
 def check_reservation_status(place_name: str, date: str, time: str) -> Dict:
     """
@@ -276,3 +284,22 @@ def get_tools_list():
         {"name": "search_movie_tickets", "description": "Vizyondaki filmler için sinema bileti arar.", "parameters": {"movie_name": {"type": "string"}}},
         {"name": "search_streaming_links", "description": "Vizyonda olmayan filmler için yayın platformu linklerini bulur.", "parameters": {"movie_name": {"type": "string"}}},
     ]
+    
+@app.get("/stats")
+def get_database_stats():
+    """Veritabanındaki film, dizi ve mekan sayılarını döndürür."""
+    try:
+        neo_movie = Neo4jConnector(DATABASE_MOVIE)
+        movies_and_series_count = neo_movie.count_nodes("Movie") # "Movie" etiketini kullanarak film ve dizi sayısını alın.
+        neo_movie.close()
+        
+        neo_place = Neo4jConnector(DATABASE_PLACE)
+        locations_count = neo_place.count_nodes("Place") # "Place" etiketini kullanarak mekan sayısını alın.
+        neo_place.close()
+        
+        return {
+            "movies_and_series_count": movies_and_series_count,
+            "locations_count": locations_count
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Veritabanı istatistikleri alınırken hata oluştu: {e}")

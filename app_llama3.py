@@ -2,14 +2,16 @@ import streamlit as st
 import os
 import requests
 import json
+import re
 from typing import List, Optional, TypedDict, Annotated
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
 from langchain_ollama import ChatOllama
-import re
 from neo4j import GraphDatabase
 import sys
 
 # ---------------- Ortam değişkenleri ----------------
+# .env dosyasından yüklemek için dotenv kütüphanesini kullanabilirsiniz.
+# Şimdilik mevcut yapıyı koruyalım, FastAPI tarafında .env kullanımını göstereceğim.
 NEO4J_URI = os.environ.get("NEO4J_URI")
 NEO4J_USER = os.environ.get("NEO4J_USER")
 NEO4J_PASSWORD = os.environ.get("NEO4J_PASSWORD")
@@ -20,7 +22,6 @@ TOOLS_SERVER_URL = "http://localhost:8000"
 @st.cache_resource
 def get_ollama_client():
     try:
-        # Streamlit'in kendi önbellekleme mekanizması
         return ChatOllama(model=OLLAMA_MODEL_NAME)
     except Exception as e:
         st.error(f"Ollama modeli başlatılamadı. Hata: {e}. Modelin çalıştığından emin olun.")
@@ -99,8 +100,28 @@ def generate_response_with_tools(user_message):
         return full_content
 
 # ---------------- Streamlit App ----------------
-st.set_page_config(page_title="İstanbul Chatbotu", layout="wide")
-st.title("İstanbul Chatbotu: Film, Mekan ve Rezervasyon")
+st.set_page_config(page_title="The Light Passenger", layout="wide")
+st.title("The Light Passenger")
+
+# Sidebar for links and stats
+st.sidebar.markdown("### Helpful Links :)")
+st.sidebar.markdown("- **LinkedIn**: [Ercan Holasoğlu](https://www.linkedin.com/in/ercan-holaso%C4%9Flu1/)")
+st.sidebar.markdown("- **Kaggle**: [Ercan Holasoğlu](https://www.kaggle.com/ercanholasoglu)")
+st.sidebar.markdown("- **HuggingFace**: [SutskeverFanBoy](https://huggingface.co/SutskeverFanBoy)")
+st.sidebar.markdown("- **GitHub**: [Ercan Holasoğlu](https://github.com/ercanholasoglu)")
+
+# Get and display database stats
+try:
+    stats_response = requests.get(f"{TOOLS_SERVER_URL}/stats")
+    stats_response.raise_for_status()
+    stats_data = stats_response.json()
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### Database Statistics")
+    st.sidebar.info(f"**Movies & Series**: {stats_data['movies_and_series_count']} adet")
+    st.sidebar.info(f"**Locations**: {stats_data['locations_count']} adet")
+except requests.exceptions.RequestException:
+    st.sidebar.error("Database istatistikleri alınamadı.")
+
 
 if 'messages' not in st.session_state:
     st.session_state.messages = []
